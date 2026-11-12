@@ -118,9 +118,6 @@ ENTHALPIES_OF_FORMATION = [
     ("Al2O3", -1675.7), ("H2O2", -187.8), ("O3", 142.7),
 ]
 
-TOOL_OPTIONS = ["Balance a reaction", "Calculate reaction statistics"]
-
-
 # ===========================================================================
 # DATACLASSES
 # ===========================================================================
@@ -133,7 +130,9 @@ class Species:
     formula: chemical formula, such as "H2O" or "Ca(OH)2"
     coefficient: number in front of the formula in the balanced equation
     molar_mass: grams per mole (0.0 means the formula was not valid)
-    mass: grams of this reactant the user started with (0.0 = not entered)
+    mass: for a reactant, the grams the user started with;
+          for a product, the grams the user actually harvested
+          (0.0 means not entered yet)
     """
     formula: str
     coefficient: int
@@ -147,12 +146,11 @@ class State:
     Everything the site remembers between pages.
 
     equation: the current balanced equation, like "2 H2 + O2 → 2 H2O"
-    reactants: the reactants of the equation on the statistics page
-    products: the products of the equation on the statistics page
+    reactants: the reactants of the equation on the calculation page
+    products: the products of the equation on the calculation page
     total_reactant_mass: sum of all reactant masses entered (grams)
     enthalpy: heat of reaction in kJ per mole of reaction as written
     enthalpy_source: where the enthalpy came from ("" = unknown)
-    actual_yield: grams of product the user actually harvested
     """
     equation: str
     reactants: list[Species]
@@ -160,13 +158,11 @@ class State:
     total_reactant_mass: float
     enthalpy: float
     enthalpy_source: str
-    actual_yield: float
 
 
 def make_new_state() -> State:
     """Return a brand-new, empty State for starting the site."""
-    return State("", [], [], 0.0, 0.0, "", 0.0)
-
+    return State("", [], [], 0.0, 0.0, "")
 
 # ===========================================================================
 # SMALL HELPERS
@@ -614,6 +610,15 @@ def describe_heat(enthalpy: float) -> str:
     elif enthalpy > 0:
         return "Endothermic: ΔH is positive, so the reaction absorbs heat."
     return "Thermoneutral: ΔH is zero, so no net heat flows."
+def percent_yield(state: State, product: Species) -> float:
+    """
+    Percent yield = harvested mass / theoretical yield * 100.
+    Returns 0.0 if there is no theoretical yield to compare against.
+    """
+    theoretical = theoretical_yield(state, product)
+    if theoretical == 0.0:
+        return 0.0
+    return product.mass / theoretical * 100
 
 
 # ===========================================================================
@@ -621,13 +626,8 @@ def describe_heat(enthalpy: float) -> str:
 # ===========================================================================
 
 def navigation() -> list:
-    """Buttons shown at the bottom of every page."""
-    return [HorizontalRule(),
-            Button("Home", index),
-            Button("Balance", balance_page),
-            Button("Reaction Stats", stats_page),
-            Button("Periodic Table", periodic_table),
-            Button("Common Molar Masses", common_molar_masses)]
+    """The button at the bottom of every page that goes back home."""
+    return [HorizontalRule(), Button("Back to Home", index)]
 
 
 def error_lines(error: str) -> list:
@@ -639,7 +639,7 @@ def error_lines(error: str) -> list:
 
 def render_balance_page(state: State, error: str) -> Page:
     """The page where the user types an unbalanced equation."""
-    return Page(state, [Header("Balance a Reaction")]
+    return Page(state, [Header("Balance an Equation")]
                 + error_lines(error)
                 + ["Type the formulas on each side, separated by +. "
                    "Example: H2 + O2 → H2O",
@@ -662,28 +662,34 @@ def atom_count_rows(reactants: list[Species],
 
 
 def render_balance_result(state: State) -> Page:
-    """Show the balanced equation and the atom check."""
+    """
+    Show the balanced equation, then let the user choose between going
+    home or calculating the stats of this reaction.
+    """
     sides = parse_equation(state.equation)
     return Page(state, [Header("Balanced Equation"),
                         state.equation,
                         "Atom check (every element must match):",
                         Table(atom_count_rows(sides[0], sides[1])),
-                        Button("Use in Calculator", move_equation),
-                        Button("Balance Another", balance_page)]
-                + navigation())
+                        "What would you like to do next?",
+                        Button("Calculate Reaction Stats", move_equation),
+                        Button("Back to Home", index)])
 
 
 def species_rows(state: State) -> list[list[str]]:
-    """Rows describing every reactant and product on the stats page."""
+    """Rows describing every reactant and product on the calculation page."""
     rows = [["Formula", "Role", "Coefficient", "Molar mass (g/mol)",
              "Mass entered (g)"]]
     for reactant in state.reactants:
-        rows.append([reactant.formula, "Reactant", str(reactant.coefficient),
+        rows.append([reactant.formula, "Reactant (starting mass)",
+                     str(reactant.coefficient),
                      format_number(reactant.molar_mass),
                      format_number(reactant.mass)])
     for product in state.products:
-        rows.append([product.formula, "Product", str(product.coefficient),
-                     format_number(product.molar_mass), "-"])
+        rows.append([product.formula, "Product (harvested mass)",
+                     str(product.coefficient),
+                     format_number(product.molar_mass),
+                     format_number(product.mass)])
     return rows
 
 
@@ -696,19 +702,23 @@ def formulas_of(species_list: list[Species]) -> list[str]:
 
 
 def mass_entry_section(state: State) -> list:
-    """Steps 2 and 3 of the stats page (only shown once an equation exists)."""
+    """Steps 2-4 of the calculation page (shown once an equation exists)."""
     if can_use_enthalpy_table(state):
-        heat_note = ("ΔH can be found from the built-in table, "
+        heat_note = ("ΔH can be found from the built-in enthalpy table, "
                      "but a value you type here will be used instead.")
     else:
-        heat_note = ("Some formulas are not in the built-in table, "
-                     "so type ΔH here if you want heat results.")
+        heat_note = ("Some formulas are not in the built-in enthalpy "
+                     "table, so type ΔH here if you want heat results.")
+    all_species = state.reactants + state.products
     return [Header("Current Equation", 2), state.equation,
             Table(species_rows(state)),
-            Header("Step 2: Enter reactant masses", 2),
-            "Reactant:",
-            SelectBox("reactant_choice", formulas_of(state.reactants),
-                      state.reactants[0].formula),
+            Header("Step 2: Enter the masses", 2),
+            "Pick a reactant and enter the grams you started with. "
+            "Then pick a product and enter the grams you harvested. "
+            "Repeat for each one.",
+            "Chemical:",
+            SelectBox("species_choice", formulas_of(all_species),
+                      all_species[0].formula),
             "Mass in grams:", TextBox("mass_text", ""),
             Button("Set Mass", input_mass),
             "Total reactant mass: "
@@ -716,12 +726,13 @@ def mass_entry_section(state: State) -> list:
             Header("Step 3: Heat of reaction (optional)", 2),
             heat_note,
             "ΔH in kJ per mole of reaction:", TextBox("enthalpy_text", ""),
+            Header("Step 4: Calculate", 2),
             Button("Calculate", calculate)]
 
 
 def render_stats_page(state: State, error: str) -> Page:
-    """The reaction statistics page (page 3 of the site diagram)."""
-    content = [Header("Reaction Statistics")] + error_lines(error)
+    """The reaction statistics (calculation) page."""
+    content = [Header("Calculate Reaction Stats")] + error_lines(error)
     content += [Header("Step 1: Enter a balanced equation", 2),
                 "Reactants:",
                 TextBox("reactant_side", side_to_text(state.reactants)),
@@ -734,7 +745,7 @@ def render_stats_page(state: State, error: str) -> Page:
 
 
 def mole_rows(state: State) -> list[list[str]]:
-    """Step 1 of the results: grams → moles → moles ÷ coefficient."""
+    """Grams → moles → moles ÷ coefficient for each reactant."""
     rows = [["Reactant", "Mass (g)", "Molar mass (g/mol)", "Moles",
              "Moles ÷ coefficient"]]
     for reactant in state.reactants:
@@ -748,7 +759,7 @@ def mole_rows(state: State) -> list[list[str]]:
 
 
 def leftover_rows(state: State) -> list[list[str]]:
-    """Step 2 of the results: how much of each reactant is left over."""
+    """How much of each reactant is left over."""
     rows = [["Reactant", "Started with (g)", "Left over (g)"]]
     for reactant in state.reactants:
         if reactant.mass > 0:
@@ -760,18 +771,34 @@ def leftover_rows(state: State) -> list[list[str]]:
     return rows
 
 
-def product_rows(state: State) -> list[list[str]]:
-    """Step 3 of the results: theoretical yield of every product."""
-    rows = [["Product", "Moles made", "Theoretical yield (g)"]]
+def yield_rows(state: State) -> list[list[str]]:
+    """Theoretical yield, harvested mass and percent yield of each product."""
+    rows = [["Product", "Theoretical yield (g)", "Harvested (g)",
+             "Percent yield"]]
     for product in state.products:
-        moles = reaction_extent(state) * product.coefficient
-        rows.append([product.formula, format_number(moles),
-                     format_number(theoretical_yield(state, product))])
+        theoretical = format_number(theoretical_yield(state, product))
+        if product.mass > 0:
+            rows.append([product.formula, theoretical,
+                         format_number(product.mass),
+                         format_number(percent_yield(state, product))
+                         + " %"])
+        else:
+            rows.append([product.formula, theoretical, "not entered", "-"])
     return rows
 
 
+def yield_warnings(state: State) -> list:
+    """Warn about any percent yield over 100%."""
+    for product in state.products:
+        if percent_yield(state, product) > 100:
+            return ["A percent yield over 100% usually means the product "
+                    "was still wet or impure, or a mass was measured "
+                    "wrong."]
+    return []
+
+
 def heat_lines(state: State) -> list:
-    """Step 4 of the results: exothermic/endothermic and heat flow."""
+    """Exothermic/endothermic and heat flow per mole of product."""
     if state.enthalpy_source == "":
         return ["No ΔH available for this reaction. Go back and type one "
                 "in to see heat results."]
@@ -792,46 +819,17 @@ def render_results_page(state: State) -> Page:
     """Show the full breakdown of the reaction, step by step."""
     limiting = find_limiting_reactant(state)
     return Page(state, [Header("Reaction Results"), state.equation,
-                        Header("Step 1: Moles of each reactant", 2),
+                        Header("Limiting Reactant", 2),
                         Table(mole_rows(state)),
                         "Limiting reactant: " + limiting
                         + " (it has the smallest moles ÷ coefficient)",
-                        Header("Step 2: Leftover reactants", 2),
                         Table(leftover_rows(state)),
-                        Header("Step 3: Theoretical yield", 2),
-                        Table(product_rows(state)),
-                        Header("Step 4: Heat of reaction", 2)]
+                        Header("Theoretical and Percent Yield", 2),
+                        Table(yield_rows(state))]
+                + yield_warnings(state)
+                + [Header("Heat of Reaction", 2)]
                 + heat_lines(state)
-                + [Button("Calculate Percent Yield", yield_page),
-                   Button("Change Masses", stats_page)]
-                + navigation())
-
-
-def render_yield_page(state: State, error: str) -> Page:
-    """Ask which product was harvested and how many grams."""
-    return Page(state, [Header("Percent Yield")] + error_lines(error)
-                + ["Which product did you collect?",
-                   SelectBox("product_choice", formulas_of(state.products),
-                             state.products[0].formula),
-                   "Actual mass you collected (g):",
-                   TextBox("actual_yield_text", ""),
-                   Button("Calculate Percent Yield", calculate_yield)]
-                + navigation())
-
-
-def render_yield_result(state: State, product: Species) -> Page:
-    """Show actual yield, theoretical yield and percent yield."""
-    theoretical = theoretical_yield(state, product)
-    percent = state.actual_yield / theoretical * 100
-    content = [Header("Percent Yield Result"),
-               "Product: " + product.formula,
-               "Actual yield: " + format_number(state.actual_yield) + " g",
-               "Theoretical yield: " + format_number(theoretical) + " g",
-               "Percent yield: " + format_number(percent) + " %"]
-    if percent > 100:
-        content.append("Over 100% usually means the product was still wet "
-                       "or impure, or a mass was measured wrong.")
-    return Page(state, content + [Button("Back to Results", calculate_page)]
+                + [Button("Change Masses", stats_page)]
                 + navigation())
 
 
@@ -841,26 +839,15 @@ def render_yield_result(state: State, product: Species) -> Page:
 
 @route
 def index(state: State) -> Page:
-    """Home page: pick a tool (page 1 of the site diagram)."""
-    content = [Header("Stoichiometry Assistant"),
-               "Balance chemical equations and find the limiting reactant, "
-               "leftovers, theoretical yield, percent yield and heat of "
-               "reaction.",
-               "What do you want to do?",
-               SelectBox("tool", TOOL_OPTIONS, TOOL_OPTIONS[0]),
-               Button("Go", choose_tool)]
-    if state.equation != "":
-        content.append("Current equation: " + state.equation)
-    return Page(state, content + navigation()
-                + [Button("Start Over", start_over)])
-
-
-@route
-def choose_tool(state: State, tool: str) -> Page:
-    """Send the user to the tool they picked in the SelectBox."""
-    if tool == "Balance a reaction":
-        return render_balance_page(state, "")
-    return render_stats_page(state, "")
+    """Home page with exactly five options."""
+    return Page(state, [Header("Stoichiometry Assistant"),
+                        "Choose an option:",
+                        Button("Balance an Equation", balance_page),
+                        Button("Calculate Reaction Stats", stats_page),
+                        Button("Periodic Table", periodic_table),
+                        Button("Common Enthalpies", common_enthalpies),
+                        Button("Molar Masses of Common Compounds",
+                               common_molar_masses)])
 
 
 @route
@@ -887,7 +874,7 @@ def balance_reaction(state: State, reactant_side: str,
 
 @route
 def move_equation(state: State) -> Page:
-    """Move the balanced equation over to the statistics page."""
+    """Move the balanced equation over to the calculation page."""
     sides = parse_equation(state.equation)
     if len(sides[0]) == 0:
         return render_balance_page(state, "Balance an equation first.")
@@ -900,14 +887,14 @@ def move_equation(state: State) -> Page:
 
 @route
 def stats_page(state: State) -> Page:
-    """Show the reaction statistics page."""
+    """Show the calculation page."""
     return render_stats_page(state, "")
 
 
 @route
 def load_equation(state: State, reactant_side: str,
                   product_side: str) -> Page:
-    """Load a balanced equation typed straight into the stats page."""
+    """Load a balanced equation typed straight into the calculation page."""
     reactants = parse_side(reactant_side)
     products = parse_side(product_side)
     error = check_sides(reactants, products)
@@ -915,7 +902,8 @@ def load_equation(state: State, reactant_side: str,
         return render_stats_page(state, error)
     if not is_balanced(reactants, products):
         return render_stats_page(state, "That equation is not balanced. "
-                                 "Use the Balance page to fix it first.")
+                                 "Use Balance an Equation on the home page "
+                                 "to fix it first.")
     state.reactants = reactants
     state.products = products
     state.equation = equation_to_text(reactants, products)
@@ -925,14 +913,20 @@ def load_equation(state: State, reactant_side: str,
 
 
 @route
-def input_mass(state: State, reactant_choice: str, mass_text: str) -> Page:
-    """Save the mass the user started with for one reactant."""
+def input_mass(state: State, species_choice: str, mass_text: str) -> Page:
+    """
+    Save a mass: the starting mass for a reactant, or the harvested mass
+    for a product.
+    """
     if not is_number(mass_text) or float(mass_text) <= 0:
         return render_stats_page(state, "The mass must be a positive "
                                  "number of grams.")
+    for product in state.products:
+        if product.formula == species_choice:
+            product.mass = float(mass_text)
     total = 0.0
     for reactant in state.reactants:
-        if reactant.formula == reactant_choice:
+        if reactant.formula == species_choice:
             reactant.mass = float(mass_text)
         total += reactant.mass
     state.total_reactant_mass = total
@@ -961,37 +955,6 @@ def calculate(state: State, enthalpy_text: str) -> Page:
 
 
 @route
-def calculate_page(state: State) -> Page:
-    """Go back to the results page without changing anything."""
-    if reaction_extent(state) == 0.0:
-        return render_stats_page(state, "Enter the mass of at least one "
-                                 "reactant first.")
-    return render_results_page(state)
-
-
-@route
-def yield_page(state: State) -> Page:
-    """Show the percent yield form (appears after the results)."""
-    if reaction_extent(state) == 0.0:
-        return render_stats_page(state, "Calculate the reaction first.")
-    return render_yield_page(state, "")
-
-
-@route
-def calculate_yield(state: State, product_choice: str,
-                    actual_yield_text: str) -> Page:
-    """Work out percent yield from the mass the user harvested."""
-    if not is_number(actual_yield_text) or float(actual_yield_text) <= 0:
-        return render_yield_page(state, "The actual yield must be a "
-                                 "positive number of grams.")
-    for product in state.products:
-        if product.formula == product_choice:
-            state.actual_yield = float(actual_yield_text)
-            return render_yield_result(state, product)
-    return render_yield_page(state, "Pick a product from the list.")
-
-
-@route
 def periodic_table(state: State) -> Page:
     """List every element with its molar mass."""
     rows = [["#", "Symbol", "Name", "Molar mass (g/mol)"]]
@@ -1004,20 +967,30 @@ def periodic_table(state: State) -> Page:
 
 
 @route
+def common_enthalpies(state: State) -> Page:
+    """List the standard enthalpies of formation the site knows."""
+    rows = [["Formula", "ΔHf° (kJ/mol)"]]
+    for entry in ENTHALPIES_OF_FORMATION:
+        rows.append([entry[0], str(entry[1])])
+    return Page(state, [Header("Common Enthalpies of Formation"),
+                        "Standard enthalpies of formation at 298 K "
+                        "(OpenStax Chemistry 2e, Appendix G). Each compound "
+                        "is in its usual state at room temperature, so H2O "
+                        "is liquid water. Pure elements such as O2, H2 and "
+                        "Fe are 0.",
+                        Table(rows)] + navigation())
+
+
+@route
 def common_molar_masses(state: State) -> Page:
     """List molar masses of common compounds (calculated, not typed in)."""
     rows = [["Formula", "Name", "Molar mass (g/mol)"]]
     for compound in COMMON_COMPOUNDS:
         rows.append([compound[0], compound[1],
                      format_number(calculate_molar_mass(compound[0]))])
-    return Page(state, [Header("Common Molar Masses"), Table(rows)]
-                + navigation())
+    return Page(state, [Header("Molar Masses of Common Compounds"),
+                        Table(rows)] + navigation())
 
-
-@route
-def start_over(state: State) -> Page:
-    """Clear everything and go back to the home page."""
-    return index(make_new_state())
 
 
 # ===========================================================================
@@ -1030,7 +1003,14 @@ def water_state() -> State:
                  [Species("H2", 2, 2.016, 10.0),
                   Species("O2", 1, 31.998, 32.0)],
                  [Species("H2O", 2, 18.015, 0.0)],
-                 42.0, 0.0, "", 0.0)
+                 42.0, 0.0, "")
+
+
+def harvested_state() -> State:
+    """Test helper: water_state, plus 30 g of H2O harvested."""
+    state = water_state()
+    state.products[0].mass = 30.0
+    return state
 
 
 # --- helpers ---------------------------------------------------------------
@@ -1121,7 +1101,23 @@ assert_equal(describe_heat(0.0),
 assert_equal(mole_rows(water_state())[2],
              ["O2", "32.0", "31.998", "1.0", "1.0"])
 assert_equal(leftover_rows(water_state())[1], ["H2", "10.0", "5.968"])
-assert_equal(product_rows(water_state())[1], ["H2O", "2.0", "36.032"])
+assert_equal(percent_yield(water_state(), water_state().products[0]), 0.0)
+assert_equal(percent_yield(harvested_state(), harvested_state().products[0]),
+             30.0 / (2 * 18.015 * 32.0 / 31.998) * 100)
+assert_equal(percent_yield(make_new_state(), Species("H2O", 2, 18.015, 5.0)),
+             0.0)
+assert_equal(mole_rows(water_state())[2],
+             ["O2", "32.0", "31.998", "1.0", "1.0"])
+assert_equal(leftover_rows(water_state())[1], ["H2", "10.0", "5.968"])
+assert_equal(yield_rows(water_state())[1],
+             ["H2O", "36.032", "not entered", "-"])
+assert_equal(yield_rows(harvested_state())[1],
+             ["H2O", "36.032", "30.0", "83.259 %"])
+assert_equal(yield_warnings(harvested_state()), [])
+assert_equal(len(yield_warnings(State("2 H2 + O2 → 2 H2O",
+                                      [Species("H2", 2, 2.016, 10.0)],
+                                      [Species("H2O", 2, 18.015, 99.0)],
+                                      10.0, 0.0, ""))), 1)
 assert_equal(error_lines(""), [])
 assert_equal(error_lines("Oops"), ["⚠ Oops"])
 
@@ -1129,36 +1125,34 @@ assert_equal(error_lines("Oops"), ["⚠ Oops"])
 assert_equal(index(make_new_state()),
              Page(make_new_state(),
                   [Header("Stoichiometry Assistant"),
-                   "Balance chemical equations and find the limiting "
-                   "reactant, leftovers, theoretical yield, percent yield "
-                   "and heat of reaction.",
-                   "What do you want to do?",
-                   SelectBox("tool", TOOL_OPTIONS, TOOL_OPTIONS[0]),
-                   Button("Go", choose_tool)]
-                  + navigation() + [Button("Start Over", start_over)]))
-assert_equal(index(water_state()).content[5],
-             "Current equation: 2 H2 + O2 → 2 H2O")
-
-assert_equal(choose_tool(make_new_state(), "Balance a reaction").content[0],
-             Header("Balance a Reaction"))
-assert_equal(choose_tool(make_new_state(),
-                         "Calculate reaction statistics").content[0],
-             Header("Reaction Statistics"))
+                   "Choose an option:",
+                   Button("Balance an Equation", balance_page),
+                   Button("Calculate Reaction Stats", stats_page),
+                   Button("Periodic Table", periodic_table),
+                   Button("Common Enthalpies", common_enthalpies),
+                   Button("Molar Masses of Common Compounds",
+                          common_molar_masses)]))
 
 assert_equal(balance_page(make_new_state()),
              Page(make_new_state(),
-                  [Header("Balance a Reaction"),
+                  [Header("Balance an Equation"),
                    "Type the formulas on each side, separated by +. "
                    "Example: H2 + O2 → H2O",
                    "Reactants:", TextBox("reactant_side", ""),
                    "→ Products:", TextBox("product_side", ""),
-                   Button("Balance", balance_reaction)] + navigation()))
+                   Button("Balance", balance_reaction),
+                   HorizontalRule(), Button("Back to Home", index)]))
 
 assert_equal(balance_reaction(make_new_state(), "H2 + O2", "H2O").state
              .equation, "2 H2 + O2 → 2 H2O")
-assert_equal(balance_reaction(make_new_state(), "H2 + O2", "H2O").content[3],
-             Table([["Element", "Reactant side", "Product side"],
-                    ["H", "4", "4"], ["O", "2", "2"]]))
+assert_equal(balance_reaction(make_new_state(), "H2 + O2", "H2O").content,
+             [Header("Balanced Equation"), "2 H2 + O2 → 2 H2O",
+              "Atom check (every element must match):",
+              Table([["Element", "Reactant side", "Product side"],
+                     ["H", "4", "4"], ["O", "2", "2"]]),
+              "What would you like to do next?",
+              Button("Calculate Reaction Stats", move_equation),
+              Button("Back to Home", index)])
 assert_equal(balance_reaction(make_new_state(), "H2 + Oo", "H2O").content[1],
              "⚠ 'Oo' is not a valid formula. Check capital letters, e.g. "
              "CO (carbon monoxide) vs Co (cobalt).")
@@ -1166,27 +1160,33 @@ assert_equal(balance_reaction(make_new_state(), "H2", "O2").content[1],
              "⚠ That reaction can't be balanced in a single way. "
              "Check the formulas.")
 
-assert_equal(move_equation(State("2 H2 + O2 → 2 H2O", [], [], 0.0, 0.0, "",
-                                 0.0)).state.reactants,
+assert_equal(move_equation(State("2 H2 + O2 → 2 H2O", [], [], 0.0, 0.0,
+                                 "")).state.reactants,
              [Species("H2", 2, 2.016, 0.0), Species("O2", 1, 31.998, 0.0)])
 assert_equal(move_equation(make_new_state()).content[1],
              "⚠ Balance an equation first.")
 
 assert_equal(stats_page(make_new_state()).content[0],
-             Header("Reaction Statistics"))
+             Header("Calculate Reaction Stats"))
 assert_equal(stats_page(water_state()).content[8], "2 H2 + O2 → 2 H2O")
+assert_equal(stats_page(water_state()).content[13],
+             SelectBox("species_choice", ["H2", "O2", "H2O"], "H2"))
 
 assert_equal(load_equation(make_new_state(), "2 H2 + O2", "2 H2O").state
              .products, [Species("H2O", 2, 18.015, 0.0)])
 assert_equal(load_equation(make_new_state(), "H2 + O2", "H2O").content[1],
-             "⚠ That equation is not balanced. Use the Balance page to fix "
-             "it first.")
+             "⚠ That equation is not balanced. Use Balance an Equation on "
+             "the home page to fix it first.")
 
 assert_equal(input_mass(load_equation(make_new_state(), "2 H2 + O2",
                                       "2 H2O").state, "O2", "16")
              .state.reactants[1].mass, 16.0)
 assert_equal(input_mass(water_state(), "H2", "4").state.total_reactant_mass,
              36.0)
+assert_equal(input_mass(water_state(), "H2O", "30").state.products[0].mass,
+             30.0)
+assert_equal(input_mass(water_state(), "H2O", "30").state
+             .total_reactant_mass, 42.0)
 assert_equal(input_mass(water_state(), "H2", "-4").content[1],
              "⚠ The mass must be a positive number of grams.")
 
@@ -1196,39 +1196,36 @@ assert_equal(calculate(water_state(), "-500").state.enthalpy_source,
 assert_equal(calculate(water_state(), "hot").content[1],
              "⚠ ΔH must be a number, like -571.6")
 assert_equal(calculate(move_equation(State("2 H2 + O2 → 2 H2O", [], [], 0.0,
-                                           0.0, "", 0.0)).state, "")
+                                           0.0, "")).state, "")
              .content[1], "⚠ Enter the mass of at least one reactant first.")
 assert_equal(calculate(water_state(), "").content[4],
              "Limiting reactant: O2 (it has the smallest moles ÷ "
              "coefficient)")
-
-assert_equal(calculate_page(water_state()).content[0],
-             Header("Reaction Results"))
-assert_equal(calculate_page(make_new_state()).content[1],
-             "⚠ Enter the mass of at least one reactant first.")
-
-assert_equal(yield_page(water_state()).content[0], Header("Percent Yield"))
-assert_equal(yield_page(make_new_state()).content[1],
-             "⚠ Calculate the reaction first.")
-
-assert_equal(calculate_yield(water_state(), "H2O", "30").state.actual_yield,
-             30.0)
-assert_equal(calculate_yield(water_state(), "H2O", "30").content[4],
-             "Percent yield: 83.259 %")
-assert_equal(calculate_yield(water_state(), "H2O", "40").content[5],
-             "Over 100% usually means the product was still wet or impure, "
-             "or a mass was measured wrong.")
-assert_equal(calculate_yield(water_state(), "H2O", "zero").content[1],
-             "⚠ The actual yield must be a positive number of grams.")
+assert_equal(calculate(harvested_state(), "").content[7],
+             Table([["Product", "Theoretical yield (g)", "Harvested (g)",
+                     "Percent yield"],
+                    ["H2O", "36.032", "30.0", "83.259 %"]]))
+assert_equal(calculate(harvested_state(), "").content[9],
+             "ΔH = -571.6 kJ per mole of reaction (from standard enthalpies "
+             "of formation, OpenStax Appendix G)")
+assert_equal(calculate(harvested_state(), "").content[10],
+             "Exothermic: ΔH is negative, so the reaction releases heat.")
+assert_equal(calculate(harvested_state(), "").content[11],
+             Table([["Product", "Heat flow per mole of product (kJ/mol)"],
+                    ["H2O", "-285.8"]]))
 
 assert_equal(periodic_table(make_new_state()).content[1].rows[1],
              ["1", "H", "Hydrogen", "1.008"])
 assert_equal(len(periodic_table(make_new_state()).content[1].rows), 119)
 
+assert_equal(common_enthalpies(make_new_state()).content[2].rows[1],
+             ["H2O", "-285.8"])
+assert_equal(len(common_enthalpies(make_new_state()).content[2].rows),
+             len(ENTHALPIES_OF_FORMATION) + 1)
+
 assert_equal(common_molar_masses(make_new_state()).content[1].rows[1],
              ["H2O", "Water", "18.015"])
 
-assert_equal(start_over(water_state()).state, make_new_state())
 
 
 # ===========================================================================
@@ -1251,3 +1248,4 @@ set_site_information(
 )
 set_website_title("Stoichiometry Assistant")
 start_server(make_new_state())
+
